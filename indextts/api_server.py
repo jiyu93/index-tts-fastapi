@@ -109,7 +109,7 @@ class TTSResponse(BaseModel):
     duration_seconds: float | None = None
     elapsed_seconds: float
     sample_rate: int = 22050
-    model_version: str | None = None
+    model_version: str | int | float | None = None
     audio_base64: str | None = None
 
 
