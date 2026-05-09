@@ -275,9 +275,47 @@ uv run webui.py -h
 
 Have fun!
 
+#### 🚀 FastAPI Server
+
+If you want to deploy IndexTTS2 as a service for your own applications, install
+the API extra and start the FastAPI server:
+
+```bash
+uv sync --extra api
+uv run indextts-api --host 0.0.0.0 --port 7861 --model_dir checkpoints
+```
+
+The server provides health checks, optional API key authentication, multipart
+audio upload, JSON/base64 requests, emotion controls, generated audio download,
+segment preview, and glossary management.
+
+See [docs/API_SERVER_ZH.md](docs/API_SERVER_ZH.md) for deployment and request
+examples.
+
+Precision behavior:
+
+- For CUDA / XPU: `--fp16` works.
+- For CPU: FP16 is forced off.
+- For Mac MPS: FP16 is also forced off.
+
+Recommended startup commands:
+
+For Mac:
+
+```bash
+uv run indextts-api --host 0.0.0.0 --port 7861 --model_dir checkpoints --device mps
+```
+
+For NVIDIA server:
+
+```bash
+uv run indextts-api --host 0.0.0.0 --port 7861 --model_dir checkpoints --device cuda:0 --fp16
+```
+
 > [!IMPORTANT]
 > It can be very helpful to use **FP16** (half-precision) inference. It is faster
 > and uses less VRAM, with a very small quality loss.
+> `--fp16` only takes effect on CUDA/XPU. CPU and Mac MPS force FP16 off.
 > 
 > **DeepSpeed** *may* also speed up inference on some systems, but it could also
 > make it slower. The performance impact is highly dependent on your specific

@@ -67,6 +67,12 @@ dependencies = [
 webui = [
   "gradio==5.45.0",
 ]
+# To install the FastAPI server support, use `uv sync --extra api` (or `--all-extras`).
+api = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "python-multipart>=0.0.9",
+]
 # To install the DeepSpeed support, use `uv sync --extra deepspeed` (or `--all-extras`).
 deepspeed = [
   "deepspeed==0.17.1",
@@ -79,6 +85,7 @@ Repository = "https://github.com/index-tts/index-tts.git"
 [project.scripts]
 # Set the installed binary names and entry points.
 indextts = "indextts.cli:main"
+indextts-api = "indextts.api_server:main"
 
 [build-system]
 # How to build the project as a CLI tool or PyPI package.
