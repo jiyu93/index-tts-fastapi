@@ -1,6 +1,6 @@
 # IndexTTS2 FastAPI 服务部署说明
 
-这个 API 服务会在进程启动时加载一次 IndexTTS2 模型，然后把推理请求串行送进模型，避免并发请求互相污染模型内部的参考音频缓存。适合作为你自己应用调用的基础语音合成能力。
+这个 API 服务会在进程启动时加载一次 IndexTTS2 模型，并通过后台任务队列串行执行推理，避免并发请求互相污染模型内部的参考音频缓存。生成语音接口是异步任务形态：提交任务立即返回 `task_id`，客户端通过轮询或 SSE 查看进度，完成后再下载音频。参考音频支持 `voice_id` 资产模式，服务端按 sha256 去重，同一段音频只保存一份。这样适合放在有 30s 超时限制的生产 API 网关后面。
 
 ## 安装
 
@@ -59,6 +59,7 @@ uv run indextts-api --host 0.0.0.0 --port 7861 --model_dir checkpoints --device 
 | `--device` | 指定 `cuda:0`、`cpu`、`mps`、`xpu` 等 |
 | `--lazy_load` | 首个请求到来时再加载模型 |
 | `--allow_local_paths` | 允许请求传服务器本地音频路径。默认关闭，推荐用上传或 base64 |
+| `--max_queue_size` | 最大排队任务数，默认 `100`；队列满时返回 `429` |
 | `--cors_origins` | 逗号分隔的跨域白名单，如 `https://app.example.com,http://localhost:3000` |
 
 环境变量同名可用，例如：
@@ -83,55 +84,143 @@ curl http://127.0.0.1:7861/health
 curl -H "Authorization: Bearer change-me" http://127.0.0.1:7861/v1/config
 ```
 
-## 生成语音：multipart 上传
+## 上传参考音频资产
 
-直接返回 wav 文件：
+推荐先把常用参考音频上传成 voice asset，拿到稳定的 `voice_id`，后续 TTS 任务只传 `voice_id`，不再重复上传音频。
 
 ```bash
-curl -X POST http://127.0.0.1:7861/v1/tts \
+curl -X POST http://127.0.0.1:7861/v1/voices \
+  -H "Authorization: Bearer change-me" \
+  -F "audio=@examples/voice_01.wav"
+```
+
+响应示例：
+
+```json
+{
+  "voice_id": "d2a2f5a3b1...",
+  "sha256": "d2a2f5a3b1...",
+  "original_filename": "voice_01.wav",
+  "path": "/data/indextts-outputs/voices/d2a2f5a3b1....wav",
+  "content_type": "audio/wav",
+  "size_bytes": 123456,
+  "created_at": 1778460000.0,
+  "last_used_at": null,
+  "use_count": 0
+}
+```
+
+同一段音频重复上传时会返回相同的 `voice_id`，不会重复保存文件。也可以用 JSON/base64 上传：
+
+```bash
+VOICE_B64=$(base64 -i examples/voice_01.wav)
+
+curl -X POST http://127.0.0.1:7861/v1/voices/json \
+  -H "Authorization: Bearer change-me" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"audio_base64\": \"$VOICE_B64\",
+    \"filename\": \"voice_01.wav\",
+    \"content_type\": \"audio/wav\"
+  }"
+```
+
+查看或删除 voice asset：
+
+```bash
+curl -H "Authorization: Bearer change-me" http://127.0.0.1:7861/v1/voices
+curl -H "Authorization: Bearer change-me" http://127.0.0.1:7861/v1/voices/<voice_id>
+curl -X DELETE -H "Authorization: Bearer change-me" http://127.0.0.1:7861/v1/voices/<voice_id>
+```
+
+## 生成语音：multipart 上传任务
+
+使用 `prompt_voice_id` 提交任务，立即返回 `task_id`：
+
+```bash
+curl -X POST http://127.0.0.1:7861/v1/tts/jobs \
   -H "Authorization: Bearer change-me" \
   -F "text=欢迎使用 IndexTTS2 API 服务。" \
-  -F "prompt_audio=@examples/voice_01.wav" \
+  -F "prompt_voice_id=<voice_id>" \
   -F "emotion_mode=speaker" \
-  -F "max_text_tokens_per_segment=120" \
+  -F "max_text_tokens_per_segment=120"
+```
+
+为了兼容临时调用，`/v1/tts/jobs` 仍然支持直接传 `prompt_audio=@...`；这类上传也会进入 voice asset 存储并按 sha256 去重。但生产客户端推荐使用 `voice_id`，避免每次请求重复传音频。
+
+响应示例：
+
+```json
+{
+  "task_id": "9f6b5d9f7f8d4d3b9b7b0e4f3d2c1a00",
+  "status": "queued",
+  "progress": 0.0,
+  "message": "queued",
+  "task_url": "http://127.0.0.1:7861/v1/tasks/9f6b5d9f7f8d4d3b9b7b0e4f3d2c1a00",
+  "events_url": "http://127.0.0.1:7861/v1/tasks/9f6b5d9f7f8d4d3b9b7b0e4f3d2c1a00/events",
+  "audio_url": "http://127.0.0.1:7861/v1/tasks/9f6b5d9f7f8d4d3b9b7b0e4f3d2c1a00/audio",
+  "queue_position": 1
+}
+```
+
+使用情感参考音频：
+
+```bash
+curl -X POST http://127.0.0.1:7861/v1/tts/jobs \
+  -H "Authorization: Bearer change-me" \
+  -F "text=这是一段带情感参考音频的测试。" \
+  -F "prompt_voice_id=<voice_id>" \
+  -F "emotion_mode=audio" \
+  -F "emo_voice_id=<emotion_voice_id>" \
+  -F "emo_alpha=0.8"
+```
+
+## 查询进度和下载音频
+
+轮询任务状态：
+
+```bash
+curl -H "Authorization: Bearer change-me" \
+  http://127.0.0.1:7861/v1/tasks/<task_id>
+```
+
+任务状态字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `status` | `queued`、`running`、`succeeded`、`failed`、`cancelled` |
+| `progress` | `0.0` 到 `1.0` |
+| `message` | 当前阶段说明，例如 `text processing...`、`saving audio...` |
+| `queue_position` | 排队位置；运行后为 `null` |
+| `audio_url` | 音频下载地址；任务完成后可用 |
+
+SSE 实时进度：
+
+```bash
+curl -N -H "Authorization: Bearer change-me" \
+  http://127.0.0.1:7861/v1/tasks/<task_id>/events
+```
+
+下载音频：
+
+```bash
+curl -H "Authorization: Bearer change-me" \
+  http://127.0.0.1:7861/v1/tasks/<task_id>/audio \
   --output out.wav
 ```
 
-返回 JSON，里面包含可下载音频 URL：
-
-```bash
-curl -X POST http://127.0.0.1:7861/v1/tts \
-  -H "Authorization: Bearer change-me" \
-  -F "text=这是一段带情感参考音频的测试。" \
-  -F "prompt_audio=@examples/voice_07.wav" \
-  -F "emotion_mode=audio" \
-  -F "emo_audio=@examples/emo_sad.wav" \
-  -F "emo_alpha=0.8" \
-  -F "response_format=json"
-```
-
-`response_format` 支持：
-
-- `file`：直接返回 `audio/wav`
-- `json`：返回任务 ID、音频 URL、耗时等元数据
-- `base64`：返回 JSON，并内联 `audio_base64`
-
-## 生成语音：JSON/base64
+## 生成语音：JSON/base64 任务
 
 适合没有 multipart 上传能力的客户端。
 
 ```bash
-PROMPT_B64=$(base64 -i examples/voice_01.wav)
-
-curl -X POST http://127.0.0.1:7861/v1/tts/json \
+curl -X POST http://127.0.0.1:7861/v1/tts/jobs/json \
   -H "Authorization: Bearer change-me" \
   -H "Content-Type: application/json" \
   -d "{
     \"text\": \"这是 JSON base64 调用示例。\",
-    \"prompt_audio_base64\": \"$PROMPT_B64\",
-    \"prompt_audio_filename\": \"voice_01.wav\",
-    \"emotion_mode\": \"speaker\",
-    \"include_audio_base64\": false
+    \"prompt_voice_id\": \"<voice_id>\",
+    \"emotion_mode\": \"speaker\"
   }"
 ```
 
@@ -149,26 +238,24 @@ curl -X POST http://127.0.0.1:7861/v1/tts/json \
 情感向量 multipart 示例：
 
 ```bash
-curl -X POST http://127.0.0.1:7861/v1/tts \
+curl -X POST http://127.0.0.1:7861/v1/tts/jobs \
   -H "Authorization: Bearer change-me" \
   -F "text=对不起嘛，我真的不是故意的。" \
-  -F "prompt_audio=@examples/voice_09.wav" \
+  -F "prompt_voice_id=<voice_id>" \
   -F "emotion_mode=vector" \
-  -F "emo_vector=[0,0,0.8,0,0,0,0,0]" \
-  --output sad.wav
+  -F "emo_vector=[0,0,0.8,0,0,0,0,0]"
 ```
 
 情感文本示例：
 
 ```bash
-curl -X POST http://127.0.0.1:7861/v1/tts \
+curl -X POST http://127.0.0.1:7861/v1/tts/jobs \
   -H "Authorization: Bearer change-me" \
   -F "text=快躲起来，他要来了！" \
-  -F "prompt_audio=@examples/voice_12.wav" \
+  -F "prompt_voice_id=<voice_id>" \
   -F "emotion_mode=text" \
   -F "emo_text=非常紧张和害怕" \
-  -F "emo_alpha=0.6" \
-  --output fear.wav
+  -F "emo_alpha=0.6"
 ```
 
 ## 其他接口
@@ -177,8 +264,17 @@ curl -X POST http://127.0.0.1:7861/v1/tts \
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查，不需要鉴权 |
 | `GET` | `/v1/config` | 当前模型和生成范围 |
+| `POST` | `/v1/voices` | 上传参考音频资产 |
+| `POST` | `/v1/voices/json` | JSON/base64 上传参考音频资产 |
+| `GET` | `/v1/voices` | 查看参考音频资产列表 |
+| `GET` | `/v1/voices/{voice_id}` | 查看参考音频资产 |
+| `DELETE` | `/v1/voices/{voice_id}` | 删除参考音频资产 |
+| `POST` | `/v1/tts/jobs` | multipart 上传并提交 TTS 任务 |
+| `POST` | `/v1/tts/jobs/json` | JSON/base64 提交 TTS 任务 |
 | `POST` | `/v1/segments/preview` | 查看分句结果 |
+| `GET` | `/v1/tasks` | 查看最近任务列表 |
 | `GET` | `/v1/tasks/{task_id}` | 查看任务元数据 |
+| `GET` | `/v1/tasks/{task_id}/events` | SSE 实时任务进度 |
 | `GET` | `/v1/tasks/{task_id}/audio` | 下载生成音频 |
 | `DELETE` | `/v1/tasks/{task_id}` | 删除任务音频 |
 | `GET` | `/v1/glossary` | 查看术语表 |
@@ -253,6 +349,6 @@ server {
 建议：
 
 - 公网部署务必开启 `INDEXTTS_API_KEY`，并放在 HTTPS 后面。
-- 单张 GPU 通常让一个服务进程独占即可；服务内部已经用锁串行推理。
+- 单张 GPU 通常让一个服务进程独占即可；服务内部已经用后台队列串行推理。
 - 如果要提高吞吐量，可以按 GPU 数量启动多个进程，再用网关分发。
-- `outputs/api/results` 会保存生成结果；可以用定时任务清理旧文件。
+- `outputs/api/voices` 保存去重后的参考音频资产，`outputs/api/results` 保存生成结果；可以用定时任务清理旧任务结果，voice asset 建议通过接口按需删除。
