@@ -63,7 +63,7 @@ class ServerSettings:
     use_accel: bool = _env_bool("INDEXTTS_ACCEL", False)
     use_torch_compile: bool = _env_bool("INDEXTTS_TORCH_COMPILE", False)
     device: str | None = os.getenv("INDEXTTS_DEVICE")
-    lazy_load: bool = _env_bool("INDEXTTS_LAZY_LOAD", False)
+    lazy_load: bool = _env_bool("INDEXTTS_LAZY_LOAD", True)
     allow_local_paths: bool = _env_bool("INDEXTTS_ALLOW_LOCAL_PATHS", False)
     max_upload_mb: int = _env_int("INDEXTTS_MAX_UPLOAD_MB", 50)
     max_queue_size: int = _env_int("INDEXTTS_MAX_QUEUE_SIZE", 100)
@@ -1064,7 +1064,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--accel", action="store_true", default=_env_bool("INDEXTTS_ACCEL", False))
     parser.add_argument("--torch_compile", action="store_true", default=_env_bool("INDEXTTS_TORCH_COMPILE", False))
     parser.add_argument("--device", default=os.getenv("INDEXTTS_DEVICE"))
-    parser.add_argument("--lazy_load", action="store_true", default=_env_bool("INDEXTTS_LAZY_LOAD", False))
+    parser.add_argument(
+        "--lazy_load",
+        dest="lazy_load",
+        action="store_true",
+        default=_env_bool("INDEXTTS_LAZY_LOAD", True),
+        help="Start the API without loading IndexTTS2; the first model-backed request loads it.",
+    )
+    parser.add_argument(
+        "--eager_load",
+        dest="lazy_load",
+        action="store_false",
+        help="Load IndexTTS2 during API startup to prewarm the service.",
+    )
     parser.add_argument("--allow_local_paths", action="store_true", default=_env_bool("INDEXTTS_ALLOW_LOCAL_PATHS", False))
     parser.add_argument("--max_upload_mb", type=int, default=_env_int("INDEXTTS_MAX_UPLOAD_MB", 50))
     parser.add_argument("--max_queue_size", type=int, default=_env_int("INDEXTTS_MAX_QUEUE_SIZE", 100))

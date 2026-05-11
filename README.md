@@ -70,6 +70,8 @@ export HF_ENDPOINT="https://hf-mirror.com"
 
 ## 启动 API 服务
 
+默认启动不会加载 IndexTTS2 模型，也不会在 startup 阶段访问 HuggingFace。第一次生成、分句预览、配置查询或术语表操作等需要模型的请求到来时，服务才会加载模型；如果辅助依赖缓存缺失，也会在那时下载。
+
 Mac：
 
 ```bash
@@ -103,6 +105,12 @@ export INDEXTTS_OUTPUT_DIR="/data/indextts-outputs"
 export INDEXTTS_FP16=true
 export INDEXTTS_MAX_QUEUE_SIZE=100
 uv run indextts-api
+```
+
+如果希望服务启动时就预热模型，可以显式使用：
+
+```bash
+uv run indextts-api --host 0.0.0.0 --port 7861 --model_dir checkpoints --device cuda:0 --fp16 --eager_load
 ```
 
 ## API 调用流程

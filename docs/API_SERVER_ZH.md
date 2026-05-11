@@ -27,6 +27,8 @@ uv sync --extra api --extra deepspeed
 
 ## 启动
 
+默认启动不会加载 IndexTTS2 模型，也不会在 startup 阶段访问 HuggingFace。第一次生成、分句预览、配置查询或术语表操作等需要模型的请求到来时，服务才会加载模型；如果辅助依赖缓存缺失，也会在那时下载。
+
 精度行为：
 
 - For CUDA / XPU：`--fp16` 会生效。
@@ -57,7 +59,8 @@ uv run indextts-api --host 0.0.0.0 --port 7861 --model_dir checkpoints --device 
 | `--deepspeed` | 尝试启用 DeepSpeed |
 | `--cuda_kernel` | 尝试启用 BigVGAN CUDA kernel |
 | `--device` | 指定 `cuda:0`、`cpu`、`mps`、`xpu` 等 |
-| `--lazy_load` | 首个请求到来时再加载模型 |
+| `--lazy_load` | 默认行为：启动 API 时不加载模型，首个需要模型的请求到来时再加载 |
+| `--eager_load` | 启动 API 时立即加载模型，用于预热服务 |
 | `--allow_local_paths` | 允许请求传服务器本地音频路径。默认关闭，推荐用上传或 base64 |
 | `--max_queue_size` | 最大排队任务数，默认 `100`；队列满时返回 `429` |
 | `--cors_origins` | 逗号分隔的跨域白名单，如 `https://app.example.com,http://localhost:3000` |
