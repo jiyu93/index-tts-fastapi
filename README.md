@@ -160,6 +160,8 @@ curl -H "Authorization: Bearer change-me" \
 - `message`：当前阶段说明
 - `queue_position`：排队位置
 
+`progress` 会包含排队、模型加载、GPT 生成、mel diffusion step 和保存音频等阶段。
+
 ### 4. SSE 实时进度
 
 ```bash

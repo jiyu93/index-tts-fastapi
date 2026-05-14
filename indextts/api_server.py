@@ -210,8 +210,10 @@ class IndexTTSService:
         self.load_lock = asyncio.Lock()
         self.infer_lock = asyncio.Lock()
         self.job_lock = RLock()
+        self.loop: asyncio.AbstractEventLoop | None = None
         self.jobs: dict[str, TaskRecord] = {}
         self.job_specs: dict[str, JobSpec] = {}
+        self.task_subscribers: dict[str, set[asyncio.Queue[None]]] = {}
         self.queued_ids: deque[str] = deque()
         self.queue: asyncio.Queue[str] | None = None
         self.worker_task: asyncio.Task[None] | None = None
@@ -261,6 +263,7 @@ class IndexTTSService:
             raise
 
     async def start(self) -> None:
+        self.loop = asyncio.get_running_loop()
         if self.queue is None:
             self.queue = asyncio.Queue(maxsize=self.settings.max_queue_size)
         if self.worker_task is None or self.worker_task.done():
@@ -274,6 +277,35 @@ class IndexTTSService:
             await self.worker_task
         except asyncio.CancelledError:
             pass
+
+    def subscribe_task(self, task_id: str) -> asyncio.Queue[None]:
+        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+        self.task_subscribers.setdefault(task_id, set()).add(queue)
+        return queue
+
+    def unsubscribe_task(self, task_id: str, queue: asyncio.Queue[None]) -> None:
+        subscribers = self.task_subscribers.get(task_id)
+        if subscribers is None:
+            return
+        subscribers.discard(queue)
+        if not subscribers:
+            self.task_subscribers.pop(task_id, None)
+
+    def _notify_task(self, task_id: str) -> None:
+        loop = self.loop
+        if loop is None or loop.is_closed():
+            return
+
+        def notify() -> None:
+            for queue in list(self.task_subscribers.get(task_id, ())):
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                queue.put_nowait(None)
+
+        loop.call_soon_threadsafe(notify)
 
     async def ensure_loaded(self) -> IndexTTS2:
         if self.tts is None:
@@ -525,6 +557,7 @@ class IndexTTSService:
             return None
 
     def update_progress(self, task_id: str, value: float | None = None, message: str | None = None) -> None:
+        should_notify = False
         with self.job_lock:
             task = self.jobs.get(task_id)
             if task is None or task.status in TERMINAL_STATUSES:
@@ -534,7 +567,11 @@ class IndexTTSService:
                 update["progress"] = min(0.99, max(task.progress, float(value)))
             if message:
                 update["message"] = message
-            self.jobs[task_id] = task.model_copy(update=update)
+            updated_task = task.model_copy(update=update)
+            should_notify = updated_task.progress != task.progress or updated_task.message != task.message
+            self.jobs[task_id] = updated_task
+        if should_notify:
+            self._notify_task(task_id)
 
     def _set_status(
         self,
@@ -548,6 +585,7 @@ class IndexTTSService:
         duration_seconds: float | None = None,
         elapsed_seconds: float | None = None,
     ) -> None:
+        should_notify = False
         with self.job_lock:
             task = self.jobs.get(task_id)
             if task is None:
@@ -570,7 +608,11 @@ class IndexTTSService:
                 update["duration_seconds"] = duration_seconds
             if elapsed_seconds is not None:
                 update["elapsed_seconds"] = elapsed_seconds
-            self.jobs[task_id] = task.model_copy(update=update)
+            updated_task = task.model_copy(update=update)
+            should_notify = updated_task != task
+            self.jobs[task_id] = updated_task
+        if should_notify:
+            self._notify_task(task_id)
 
     async def _worker_loop(self) -> None:
         if self.queue is None:
@@ -971,19 +1013,26 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         service.get_task(task_id)
 
         async def event_stream():
+            updates = service.subscribe_task(task_id)
             last_payload = None
-            while True:
-                if await request.is_disconnected():
-                    break
-                task = task_response(request, service.get_task(task_id))
-                payload = task.model_dump()
-                if payload != last_payload:
-                    yield sse_message("task", payload)
-                    last_payload = payload
-                if task.status in TERMINAL_STATUSES:
-                    yield sse_message("done", payload)
-                    break
-                await asyncio.sleep(1.0)
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    task = task_response(request, service.get_task(task_id))
+                    payload = task.model_dump()
+                    if payload != last_payload:
+                        yield sse_message("task", payload)
+                        last_payload = payload
+                    if task.status in TERMINAL_STATUSES:
+                        yield sse_message("done", payload)
+                        break
+                    try:
+                        await asyncio.wait_for(updates.get(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                service.unsubscribe_task(task_id, updates)
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 

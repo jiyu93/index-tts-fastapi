@@ -1,6 +1,6 @@
 # IndexTTS2 FastAPI 服务部署说明
 
-这个 API 服务会在进程启动时加载一次 IndexTTS2 模型，并通过后台任务队列串行执行推理，避免并发请求互相污染模型内部的参考音频缓存。生成语音接口是异步任务形态：提交任务立即返回 `task_id`，客户端通过轮询或 SSE 查看进度，完成后再下载音频。参考音频支持 `voice_id` 资产模式，服务端按 sha256 去重，同一段音频只保存一份。这样适合放在有 30s 超时限制的生产 API 网关后面。
+这个 API 服务默认在第一次需要模型的请求到来时加载 IndexTTS2，并通过后台任务队列串行执行推理，避免并发请求互相污染模型内部的参考音频缓存。生成语音接口是异步任务形态：提交任务立即返回 `task_id`，客户端通过轮询或 SSE 查看进度，完成后再下载音频。参考音频支持 `voice_id` 资产模式，服务端按 sha256 去重，同一段音频只保存一份。这样适合放在有 30s 超时限制的生产 API 网关后面。
 
 ## 安装
 
@@ -193,7 +193,7 @@ curl -H "Authorization: Bearer change-me" \
 | --- | --- |
 | `status` | `queued`、`running`、`succeeded`、`failed`、`cancelled` |
 | `progress` | `0.0` 到 `1.0` |
-| `message` | 当前阶段说明，例如 `text processing...`、`saving audio...` |
+| `message` | 当前阶段说明，例如 `gpt generating 1/1...`、`mel diffusion 1/1 12/25...`、`saving audio...` |
 | `queue_position` | 排队位置；运行后为 `null` |
 | `audio_url` | 音频下载地址；任务完成后可用 |
 

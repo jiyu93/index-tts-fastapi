@@ -28,7 +28,18 @@ class BASECFM(torch.nn.Module, ABC):
             self.zero_prompt_speech_token = False
 
     @torch.inference_mode()
-    def inference(self, mu, x_lens, prompt, style, f0, n_timesteps, temperature=1.0, inference_cfg_rate=0.5):
+    def inference(
+        self,
+        mu,
+        x_lens,
+        prompt,
+        style,
+        f0,
+        n_timesteps,
+        temperature=1.0,
+        inference_cfg_rate=0.5,
+        progress_callback=None,
+    ):
         """Forward diffusion
 
         Args:
@@ -52,9 +63,19 @@ class BASECFM(torch.nn.Module, ABC):
         z = torch.randn([B, self.in_channels, T], device=mu.device) * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
         # t_span = t_span + (-1) * (torch.cos(torch.pi / 2 * t_span) - 1 + t_span)
-        return self.solve_euler(z, x_lens, prompt, mu, style, f0, t_span, inference_cfg_rate)
+        return self.solve_euler(
+            z,
+            x_lens,
+            prompt,
+            mu,
+            style,
+            f0,
+            t_span,
+            inference_cfg_rate,
+            progress_callback=progress_callback,
+        )
 
-    def solve_euler(self, x, x_lens, prompt, mu, style, f0, t_span, inference_cfg_rate=0.5):
+    def solve_euler(self, x, x_lens, prompt, mu, style, f0, t_span, inference_cfg_rate=0.5, progress_callback=None):
         """
         Fixed euler solver for ODEs.
         Args:
@@ -82,6 +103,7 @@ class BASECFM(torch.nn.Module, ABC):
         x[..., :prompt_len] = 0
         if self.zero_prompt_speech_token:
             mu[..., :prompt_len] = 0
+        total_steps = len(t_span) - 1
         for step in tqdm(range(1, len(t_span))):
             dt = t_span[step] - t_span[step - 1]
             if inference_cfg_rate > 0:
@@ -111,6 +133,8 @@ class BASECFM(torch.nn.Module, ABC):
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
             x[:, :, :prompt_len] = 0
+            if progress_callback is not None:
+                progress_callback(step, total_steps)
 
         return sol[-1]
     def forward(self, x1, x_lens, prompt_lens, mu, style):

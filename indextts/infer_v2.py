@@ -534,8 +534,17 @@ class IndexTTS2:
         has_warned = False
         silence = None # for stream_return
         for seg_idx, sent in enumerate(segments):
-            self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
-                                  f"speech synthesis {seg_idx + 1}/{segments_count}...")
+            segment_progress_start = 0.2 + 0.7 * seg_idx / segments_count
+            segment_progress_span = 0.7 / segments_count
+            gpt_done_progress = segment_progress_start + segment_progress_span * 0.45
+            gpt_forward_done_progress = segment_progress_start + segment_progress_span * 0.55
+            diffusion_start_progress = segment_progress_start + segment_progress_span * 0.55
+            diffusion_done_progress = segment_progress_start + segment_progress_span * 0.90
+            vocoder_done_progress = segment_progress_start + segment_progress_span * 0.98
+            diffusion_steps = 25
+            inference_cfg_rate = 0.7
+            segment_label = f"{seg_idx + 1}/{segments_count}"
+            self._set_gr_progress(segment_progress_start, f"gpt generating {segment_label}...")
 
             text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
             text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
@@ -581,6 +590,7 @@ class IndexTTS2:
                     )
 
                 gpt_gen_time += time.perf_counter() - m_start_time
+                self._set_gr_progress(gpt_done_progress, f"gpt decoding {segment_label}...")
                 if not has_warned and (codes[:, -1] != self.stop_mel_token).any():
                     warnings.warn(
                         f"WARN: generation stopped due to exceeding `max_mel_tokens` ({max_mel_tokens}). "
@@ -630,12 +640,11 @@ class IndexTTS2:
                         use_speed=use_speed,
                     )
                     gpt_forward_time += time.perf_counter() - m_start_time
+                self._set_gr_progress(gpt_forward_done_progress, f"mel diffusion {segment_label} 0/{diffusion_steps}...")
 
                 dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
-                    diffusion_steps = 25
-                    inference_cfg_rate = 0.7
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
@@ -647,18 +656,28 @@ class IndexTTS2:
                                                                  n_quantizers=3,
                                                                  f0=None)[0]
                     cat_condition = torch.cat([prompt_condition, cond], dim=1)
+
+                    def report_diffusion_progress(step, total):
+                        progress = diffusion_start_progress
+                        if total > 0:
+                            progress += (diffusion_done_progress - diffusion_start_progress) * step / total
+                        self._set_gr_progress(progress, f"mel diffusion {segment_label} {step}/{total}...")
+
                     vc_target = self.s2mel.models['cfm'].inference(cat_condition,
                                                                    torch.LongTensor([cat_condition.size(1)]).to(
                                                                        cond.device),
                                                                    ref_mel, style, None, diffusion_steps,
-                                                                   inference_cfg_rate=inference_cfg_rate)
+                                                                   inference_cfg_rate=inference_cfg_rate,
+                                                                   progress_callback=report_diffusion_progress)
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
                     s2mel_time += time.perf_counter() - m_start_time
+                    self._set_gr_progress(diffusion_done_progress, f"vocoder {segment_label}...")
 
                     m_start_time = time.perf_counter()
                     wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
                     print(wav.shape)
                     bigvgan_time += time.perf_counter() - m_start_time
+                    self._set_gr_progress(vocoder_done_progress, f"speech synthesis {segment_label} completed...")
                     wav = wav.squeeze(1)
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
